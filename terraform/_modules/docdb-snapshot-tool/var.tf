@@ -57,3 +57,13 @@ variable "tags" {
   type = map(string)
   description = "tags"
 }
+
+variable "zip_repo_url" {
+  type = string
+  description = "Repository URL containing zip files"
+}
+
+variable "zip_repo_version" {
+  type = string
+  description = "Repository release version identifier"
+}

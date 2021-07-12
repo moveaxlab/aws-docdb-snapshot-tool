@@ -26,7 +26,9 @@ locals {
   backupInterval      = local.environment_vars.locals.snaptool_backupInterval
   retention_days      = local.environment_vars.locals.snaptool_retention_days
   # lambda_zip_path     = local.environment_vars.locals.snaptool_lambda_zip_path
-  lambda_zip_path     = "${get_terragrunt_dir()}/../../../docdb_snapshot_tools/zip_files"
+  lambda_zip_path     = "${get_terragrunt_dir()}/zip_files"
+  zip_repo_url        = "https://github.com/moveaxlab/aws-docdb-snapshot-tool/releases/download"
+  zip_repo_version    = local.environment_vars.locals.snaptool_zip_repo_version
 
   tags                = {
     environment = "${local.environment}"
