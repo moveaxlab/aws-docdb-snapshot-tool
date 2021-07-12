@@ -1,0 +1,771 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "CodeBucket": {
+			"Type": "String",
+			"Default": "DEFAULT_BUCKET",
+			"Description": "Name of the bucket that contains the lambda functions to deploy. Leave the default value to download the code from the AWS Managed buckets"
+		},
+        "Region": {
+			"Type": "String",
+			"Default": "eu-central-1",
+			"Description": "AWS region"
+		},
+        "DrRegion": {
+			"Type": "String",
+			"Default": "eu-west-1",
+			"Description": "AWS DR-Region"
+		},
+        "RegionOverride": {
+			"Type": "String",
+			"Default": "NO",
+			"Description": "Set to the region where your docdb instances run, only if such region does not support Step Functions. Leave as NO otherwise"
+		},
+        "InstanceNamePattern": {
+			"Type": "String",
+			"Default": "ALL_INSTANCES",
+			"Description": "Python regex for matching cluster identifiers to backup. Use \"ALL_INSTANCES\" to back up every docdb instance in the region."
+		},
+        "SnapshotNamePattern": {
+			"Type": "String",
+			"Default": "ALL_SNAPSHOTS",
+			"Description": "Python regex for matching snapshot names. Use \"ALL_SNAPSHOTS\" to select up every snapshot in the region."
+		},
+        "BackupInterval": {
+			"Type": "Number",
+			"Default": "24",
+			"Description": "Interval for backups in hours. Default is 24"
+		},
+        "TaggedInstance": {
+			"Type": "String",
+			"Default": "FALSE",
+			"Description": "Set to TRUE to filter instances that have tag CopyDBSnapshot set to True. Set to FALSE to disable",
+			"AllowedValues": ["TRUE", "FALSE"]
+		},
+        "LogLevel": {
+			"Type": "String",
+			"Default": "ERROR",
+			"Description": "Log level for Lambda functions (DEBUG, INFO, WARN, ERROR, CRITICAL are valid values)."
+		},
+        "RetentionDays": {
+			"Type": "Number",
+			"Default": "7",
+			"Description": "Number of days to keep snapshots in retention before deleting them"
+		},
+		"CopySnapshots": {
+			"Type": "String",
+			"Default": "TRUE",
+			"AllowedValues": ["TRUE", "FALSE"]
+		},
+		"DeleteOldSnapshots": {
+			"Type": "String",
+			"Default": "TRUE",
+			"AllowedValues": ["TRUE", "FALSE"]
+		},
+		"LambdaCWLogRetention": {
+			"Type": "Number",
+			"Default": "7",
+			"Description": "Number of days to retain logs from the lambda functions in CloudWatch Logs"
+		},
+		"LogGroupName": {
+			"Type": "String",
+			"Default": "lambdaDeleteOldSnapshotsDOCDB-source",
+			"Description": "Name for DOCDB snapshot log group."
+		},
+		"BackupSchedule": {
+			"Type": "String",
+			"Default": "0 1 * * ? *",
+			"Description": "TakeSnapshot schedule in Cloudwatch Event cron format. Needs to run at least once for every Interval. The default value runs once every at 1AM UTC. More information: http://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html"
+		},
+		"CopySchedule": {
+			"Type": "String",
+			"Default": "/30 * * * ? *",
+			"Description": "CopySnapshot schedule in Cloudwatch Event cron format. Needs to run at least once for every Interval. The default value runs once every at 1AM UTC. More information: http://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html"
+		},
+		"DeleteSchedule": {
+			"Type": "String",
+			"Default": "0 /1 * * ? *",
+			"Description": "DeleteOldSnapshot schedule in Cloudwatch Event cron format. Needs to run at least once for every Interval. The default value runs once every at 1AM UTC. More information: http://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html"
+		}
+    },
+	"Conditions": {
+		"Copy": {
+			"Fn::Equals": [{
+				"Ref": "CopySnapshots"
+			}, "TRUE"]
+		},
+		"DeleteOld": {
+			"Fn::Equals": [{
+				"Ref": "DeleteOldSnapshots"
+			}, "TRUE"]
+		},
+		"DefaultBucket": {
+			"Fn::Equals": [{
+				"Ref": "CodeBucket"
+			}, "DEFAULT_BUCKET"]
+		}
+	},
+    "Mappings": {
+		"Buckets": {
+			"eu-west-1": {
+				"Bucket": "snapshots-tool-docdb-eu-west-1"
+			},
+			"eu-central-1": {
+				"Bucket": "snapshots-tool-docdb-eu-central-1"
+			}
+		}
+	},
+    "Resources": {
+		"topicBackupsFailed": {
+			"Type": "AWS::SNS::Topic",
+			"Properties": {
+				"DisplayName": "backups_failed_docdb"
+			}
+		},
+		"topicCopyFailed": {
+			"Type": "AWS::SNS::Topic",
+			"Properties": {
+				"DisplayName": "copy_failed_docdb"
+			}
+		},
+		"topicDeleteOldFailed": {
+			"Type": "AWS::SNS::Topic",
+			"Properties": {
+				"DisplayName": "delete_old_failed_docdb"
+			}
+		},
+		"snspolicySnapshotsDOCDB": {
+			"Type": "AWS::SNS::TopicPolicy",
+			"Properties": {
+				"Topics": [
+					{
+						"Ref": "topicBackupsFailed"
+					},
+					{
+						"Ref": "topicCopyFailed"
+					}, 
+					{
+						"Ref": "topicDeleteOldFailed"
+					}
+				],
+				"PolicyDocument": {
+					"Version": "2008-10-17",
+					"Id": "__default_policy_ID",
+					"Statement": [{
+						"Sid": "__default_statement_ID",
+						"Effect": "Allow",
+						"Principal": {
+							"AWS": "*"
+						},
+						"Action": [
+							"SNS:GetTopicAttributes",
+							"SNS:SetTopicAttributes",
+							"SNS:AddPermission",
+							"SNS:RemovePermission",
+							"SNS:DeleteTopic",
+							"SNS:Subscribe",
+							"SNS:ListSubscriptionsByTopic",
+							"SNS:Publish",
+							"SNS:Receive"
+						],
+						"Resource": "*",
+						"Condition": {
+							"StringEquals": {
+								"AWS:SourceOwner": {
+									"Ref": "AWS::AccountId"
+								}
+							}
+						}
+					}]
+				}
+			}
+		},
+		"alarmcwBackupsFailed": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"ActionsEnabled": "true",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": "1",
+				"MetricName": "ExecutionsFailed",
+				"Namespace": "AWS/States",
+				"Period": "300",
+				"Statistic": "Sum",
+				"Threshold": "1.0",
+				"AlarmActions": [{
+					"Ref": "topicBackupsFailed"
+				}],
+				"Dimensions": [{
+					"Name": "StateMachineArn",
+					"Value": {
+						"Ref": "stateMachineTakeSnapshotsDOCDB"
+					}
+				}]
+			}
+		},
+		"alarmcwCopyFailed": {
+			"Condition": "Copy",
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"ActionsEnabled": "true",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": "2",
+				"MetricName": "ExecutionsFailed",
+				"Namespace": "AWS/States",
+				"Period": "3600",
+				"Statistic": "Sum",
+				"Threshold": "2.0",
+				"AlarmActions": [{
+					"Ref": "topicCopyFailed"
+				}],
+				"Dimensions": [{
+					"Name": "StateMachineArn",
+					"Value": {
+						"Ref": "statemachineCopySnapshotsDOCDB"
+					}
+				}]
+			}
+		},
+		"alarmcwDeleteOldFailed": {
+			"Condition": "DeleteOld",
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"ActionsEnabled": "true",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": "2",
+				"MetricName": "ExecutionsFailed",
+				"Namespace": "AWS/States",
+				"Period": "3600",
+				"Statistic": "Sum",
+				"Threshold": "2.0",
+				"AlarmActions": [{
+					"Ref": "topicDeleteOldFailed"
+				}],
+				"Dimensions": [{
+					"Name": "StateMachineArn",
+					"Value": {
+						"Ref": "statemachineDeleteOldSnapshotsDOCDB"
+					}
+				}]
+			}
+		},
+        "iamroleSnapshotsDOCDB": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+					"Version": "2012-10-17",
+					"Statement": [{
+						"Effect": "Allow",
+						"Principal": {
+							"Service": "lambda.amazonaws.com"
+						},
+						"Action": "sts:AssumeRole"
+					}]
+				},
+                "Policies": [
+					{
+						"PolicyName": "inline_policy_snapshots_docdb_cw_logs",
+						"PolicyDocument": {
+							"Version": "2012-10-17",
+							"Statement": [{
+								"Effect": "Allow",
+								"Action": [
+									"logs:CreateLogGroup",
+									"logs:CreateLogStream",
+									"logs:PutLogEvents"
+								],
+								"Resource": "arn:aws:logs:*:*:*"
+							}]
+						}
+					},
+                    {
+                        "PolicyName": "inline_policy_snapshots_docdb",
+						"PolicyDocument": {
+							"Version": "2012-10-17",
+							"Statement": [{
+								"Effect": "Allow",
+								"Action": [
+									"rds:DeleteDBClusterSnapshot",
+									"rds:DescribeDBClusterSnapshots",
+									"rds:DescribeDBInstances",
+									"rds:ListTagsForResource",
+									"rds:ModifyDBClusterSnapshotAttribute",
+									"rds:DescribeDBClusterSnapshotAttributes",
+									"rds:CreateDBClusterSnapshot",
+									"rds:CopyDBClusterSnapshot",
+									"rds:AddTagsToResource"
+								],
+								"Resource": "*"
+                            }]
+                        }
+                    }
+                ]
+            }
+        },
+        "lambdaTakeSnapshotsDOCDB": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Description": "Create new docdb snapshot",
+                "Code": {
+					"S3Bucket": {
+						"Fn::If": ["DefaultBucket", {
+							"Fn::FindInMap": ["Buckets", {
+								"Ref": "AWS::Region"
+							}, "Bucket"]
+						}, {
+							"Ref": "CodeBucket"
+						}]
+					},
+					"S3Key": "take_snapshots_docdb.zip"
+				},
+                "MemorySize" : 512,
+                "Environment": {
+					"Variables": {
+						"LOG_LEVEL": {
+							"Ref": "LogLevel"
+						},
+						"PATTERN": {
+							"Ref": "InstanceNamePattern"
+						},
+						"TAGGEDINSTANCE": {
+							"Ref": "TaggedInstance"
+						},
+                        "INTERVAL": {
+                            "Ref": "BackupInterval"
+                        },
+                        "SOURCE_REGION": {
+                            "Ref": "Region"
+                        },
+                        "REGION_OVERRIDE": {
+                            "Ref": "RegionOverride"
+                        }
+					}
+				},
+                "Role": {
+					"Fn::GetAtt": ["iamroleSnapshotsDOCDB", "Arn"]
+				},
+                "Runtime": "python3.8",
+				"Handler": "lambda_function.lambda_handler",
+				"Timeout": 300
+            }
+        },
+        "lambdaCopySnapshotsDOCDB": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Description": "Copy docdb snapshot on destination region (dr-region)",
+                "Code": {
+					"S3Bucket": {
+						"Fn::If": ["DefaultBucket", {
+							"Fn::FindInMap": ["Buckets", {
+								"Ref": "AWS::Region"
+							}, "Bucket"]
+						}, {
+							"Ref": "CodeBucket"
+						}]
+					},
+					"S3Key": "copy_snapshots_dest_docdb.zip"
+				},
+                "MemorySize" : 512,
+                "Environment": {
+                    "Variables": {
+                        "LOG_LEVEL": {
+							"Ref": "LogLevel"
+						},
+						"SNAPSHOT_PATTERN": {
+							"Ref": "SnapshotNamePattern"
+						},
+						"RETENTION_DAYS": {
+							"Ref": "RetentionDays"
+						},
+                        "SOURCE_REGION": {
+                            "Ref": "Region"
+                        },
+                        "DEST_REGION": {
+                            "Ref": "DrRegion"
+                        },
+                        "REGION_OVERRIDE": {
+                            "Ref": "RegionOverride"
+                        }
+                    }
+                },
+                "Role": {
+					"Fn::GetAtt": ["iamroleSnapshotsDOCDB", "Arn"]
+				},
+                "Runtime": "python3.8",
+				"Handler": "lambda_function.lambda_handler",
+				"Timeout": 300
+            }
+        },
+        "lambdaDeleteOldSnapshotsDOCDB": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Description": "Delete old snapshot (older than retention period) from destination region (dr-region)",
+                "Code": {
+					"S3Bucket": {
+						"Fn::If": ["DefaultBucket", {
+							"Fn::FindInMap": ["Buckets", {
+								"Ref": "AWS::Region"
+							}, "Bucket"]
+						}, {
+							"Ref": "CodeBucket"
+						}]
+					},
+					"S3Key": "delete_old_snapshots_docdb.zip"
+				},
+                "MemorySize" : 512,
+                "Environment": {
+					"Variables": {
+						"LOG_LEVEL": {
+							"Ref": "LogLevel"
+						},
+						"PATTERN": {
+							"Ref": "InstanceNamePattern"
+						},
+						"RETENTION_DAYS": {
+							"Ref": "RetentionDays"
+						},
+                        "REGION": {
+                            "Ref": "DrRegion"
+                        },
+                        "REGION_OVERRIDE": {
+                            "Ref": "RegionOverride"
+                        }
+					}
+				},
+                "Role": {
+					"Fn::GetAtt": ["iamroleSnapshotsDOCDB", "Arn"]
+				},
+                "Runtime": "python3.8",
+				"Handler": "lambda_function.lambda_handler",
+				"Timeout": 300
+            }
+        },
+		"iamroleStateExecution": {
+			"Type": "AWS::IAM::Role",
+			"Properties": {
+				"AssumeRolePolicyDocument": {
+					"Version": "2012-10-17",
+					"Statement": [{
+						"Effect": "Allow",
+						"Principal": {
+							"Service": {
+								"Fn::Join": ["", ["states.", {
+									"Ref": "AWS::Region"
+								}, ".amazonaws.com"]]
+							}
+						},
+						"Action": "sts:AssumeRole"
+					}]
+				},
+				"Policies": [{
+					"PolicyName": "inline_policy_snapshots_docdb",
+					"PolicyDocument": {
+						"Version": "2012-10-17",
+						"Statement": [{
+							"Effect": "Allow",
+							"Action": [
+								"lambda:InvokeFunction"
+							],
+							"Resource": "*"
+						}]
+					}
+				}]
+			}
+		},
+		"stateMachineTakeSnapshotsDOCDB": {
+			"Type": "AWS::StepFunctions::StateMachine",
+			"Properties": {
+				"DefinitionString": {
+					"Fn::Join": ["", [{
+							"Fn::Join": ["\n", [
+								" {\"Comment\":\"Triggers snapshot backup for DOCDB instances\",",
+								" \"StartAt\":\"TakeSnapshots\",",
+								" \"States\":{",
+								"   \"TakeSnapshots\":{",
+								"     \"Type\":\"Task\",",
+								"     \"Resource\": "
+							]]
+						},
+						"\"",
+						{
+							"Fn::GetAtt": ["lambdaTakeSnapshotsDOCDB", "Arn"]
+						}, "\"\n,",
+						{
+							"Fn::Join": ["\n", [
+								"     \"Retry\":[",
+								"       {",
+								"       \"ErrorEquals\":[ ",
+								"         \"SnapshotToolException\"",
+								"       ],",
+								"       \"IntervalSeconds\":300,",
+								"       \"MaxAttempts\":20,",
+								"       \"BackoffRate\":1",
+								"     },",
+								"     {",
+								"      \"ErrorEquals\":[ ",
+								"         \"States.ALL\"], ",
+								"         \"IntervalSeconds\": 30,",
+								"         \"MaxAttempts\": 20,",
+								"         \"BackoffRate\": 1",
+								"     }",
+								"    ],",
+								"    \"End\": true ",
+								"   }",
+								" }}"
+							]]
+						}
+					]]
+				},
+				"RoleArn": {
+					"Fn::GetAtt": ["iamroleStateExecution", "Arn"]
+				}
+			}
+		},
+		"statemachineCopySnapshotsDOCDB": {
+			"Type": "AWS::StepFunctions::StateMachine",
+			"Condition": "Copy",
+			"Properties": {
+				"DefinitionString": {
+					"Fn::Join": ["", [{
+							"Fn::Join": ["\n", [
+								" {\"Comment\":\"Copy snapshots to DEST_REGION\",",
+								" \"StartAt\":\"CopySnapshots\",",
+								" \"States\":{",
+								"   \"CopySnapshots\":{",
+								"     \"Type\":\"Task\",",
+								"     \"Resource\": "
+							]]
+						},
+						"\"",
+						{
+							"Fn::GetAtt": ["lambdaCopySnapshotsDOCDB", "Arn"]
+						}, "\"\n,",
+						{
+							"Fn::Join": ["\n", [
+								"     \"Retry\":[",
+								"       {",
+								"       \"ErrorEquals\":[ ",
+								"         \"SnapshotToolException\"",
+								"       ],",
+								"       \"IntervalSeconds\":300,",
+								"       \"MaxAttempts\":3,",
+								"       \"BackoffRate\":1",
+								"     },",
+								"     {",
+								"      \"ErrorEquals\":[ ",
+								"         \"States.ALL\"], ",
+								"         \"IntervalSeconds\": 30,",
+								"         \"MaxAttempts\": 20,",
+								"         \"BackoffRate\": 1",
+								"     }",
+								"    ],",
+								"    \"End\": true ",
+								"   }",
+								" }}"
+							]]
+						}
+					]]
+				},
+				"RoleArn": {
+					"Fn::GetAtt": ["iamroleStateExecution", "Arn"]
+				}
+			}
+		},
+		"statemachineDeleteOldSnapshotsDOCDB": {
+			"Type": "AWS::StepFunctions::StateMachine",
+			"Condition": "DeleteOld",
+			"Properties": {
+				"DefinitionString": {
+					"Fn::Join": ["", [{
+							"Fn::Join": ["\n", [
+								" {\"Comment\":\"DeleteOld management for DOCDB snapshots\",",
+								" \"StartAt\":\"DeleteOld\",",
+								" \"States\":{",
+								"   \"DeleteOld\":{",
+								"     \"Type\":\"Task\",",
+								"     \"Resource\": "
+							]]
+						},
+						"\"",
+						{
+							"Fn::GetAtt": ["lambdaDeleteOldSnapshotsDOCDB", "Arn"]
+						}, "\"\n,",
+						{
+							"Fn::Join": ["\n", [
+								"     \"Retry\":[",
+								"       {",
+								"       \"ErrorEquals\":[ ",
+								"         \"SnapshotToolException\"",
+								"       ],",
+								"       \"IntervalSeconds\":300,",
+								"       \"MaxAttempts\":7,",
+								"       \"BackoffRate\":1",
+								"     },",
+								"     {",
+								"      \"ErrorEquals\":[ ",
+								"         \"States.ALL\"], ",
+								"         \"IntervalSeconds\": 30,",
+								"         \"MaxAttempts\": 20,",
+								"         \"BackoffRate\": 1",
+								"     }",
+								"    ],",
+								"    \"End\": true ",
+								"   }",
+								" }}"
+							]]
+						}
+					]]
+				},
+				"RoleArn": {
+					"Fn::GetAtt": ["iamroleStateExecution", "Arn"]
+				}
+			}
+		},
+		"iamroleStepInvocation": {
+			"Type": "AWS::IAM::Role",
+			"Properties": {
+				"AssumeRolePolicyDocument": {
+					"Version": "2012-10-17",
+					"Statement": [{
+						"Effect": "Allow",
+						"Principal": {
+							"Service": "events.amazonaws.com"
+						},
+						"Action": "sts:AssumeRole"
+					}]
+				},
+				"Policies": [{
+					"PolicyName": "inline_policy_state_invocation",
+					"PolicyDocument": {
+						"Version": "2012-10-17",
+						"Statement": [{
+							"Effect": "Allow",
+							"Action": [
+								"states:StartExecution"
+							],
+							"Resource": "*"
+						}]
+					}
+				}]
+			}
+		},
+		"cwEventBackupDOCDB": {
+			"Type": "AWS::Events::Rule",
+			"Properties": {
+				"Description": "Triggers the TakeSnapshotsDOCDB state machine",
+				"ScheduleExpression": {
+					"Fn::Join": ["", ["cron(", {
+						"Ref": "BackupSchedule"
+					}, ")"]]
+				},
+				"State": "ENABLED",
+				"Targets": [{
+					"Arn": {
+						"Ref": "stateMachineTakeSnapshotsDOCDB"
+					},
+					"Id": "Target1",
+					"RoleArn": {
+						"Fn::GetAtt": ["iamroleStepInvocation", "Arn"]
+					}
+				}]
+			}
+		},
+		"cwEventCopySnapshotsDOCDB": {
+			"Type": "AWS::Events::Rule",
+			"Properties": {
+				"Description": "Triggers the CopySnapshotsDOCDB state machine",
+				"ScheduleExpression": {
+					"Fn::Join": ["", ["cron(", {
+						"Ref": "CopySchedule"
+					}, ")"]]
+				},
+				"State": "ENABLED",
+				"Targets": [{
+					"Arn": {
+						"Ref": "statemachineCopySnapshotsDOCDB"
+					},
+					"Id": "Target1",
+					"RoleArn": {
+						"Fn::GetAtt": ["iamroleStepInvocation", "Arn"]
+					}
+				}]
+			}
+		},
+		"cwEventDeleteOldSnapshotsDOCDB": {
+			"Type": "AWS::Events::Rule",
+			"Condition": "DeleteOld",
+			"Properties": {
+				"Description": "Triggers the DeleteOldSnapshotsDOCDB state machine",
+				"ScheduleExpression": {
+					"Fn::Join": ["", ["cron(", {
+						"Ref": "DeleteSchedule"
+					}, ")"]]
+				},
+				"State": "ENABLED",
+				"Targets": [{
+					"Arn": {
+						"Ref": "statemachineDeleteOldSnapshotsDOCDB"
+					},
+					"Id": "Target1",
+					"RoleArn": {
+						"Fn::GetAtt": ["iamroleStepInvocation", "Arn"]
+					}
+				}]
+			}
+		},
+		"cwloggrouplambdaTakeSnapshotsDOCDB":{
+			"Type": "AWS::Logs::LogGroup",
+			"Description": "Log group for the lambdaTakeSnapshotsDOCDB function's logs",
+			"DependsOn": "lambdaTakeSnapshotsDOCDB",
+			"Properties": {
+				"RetentionInDays": { "Ref": "LambdaCWLogRetention" }, 
+				"LogGroupName": { 
+					"Fn::Sub": [ "/aws/lambda/${func}", { "func": {	"Ref" : "lambdaTakeSnapshotsDOCDB" } } ]
+				}
+			}
+		},
+		"cwloggrouplambdaCopySnapshotsDOCDB":{
+			"Type": "AWS::Logs::LogGroup",
+			"Description": "Log group for the lambdaCopySnapshotsDOCDB function's logs",
+			"DependsOn": "lambdaCopySnapshotsDOCDB",
+			"Properties": {
+				"RetentionInDays": { "Ref": "LambdaCWLogRetention" }, 
+				"LogGroupName": { 
+					"Fn::Sub": [ "/aws/lambda/${func}", { "func": {	"Ref" : "lambdaCopySnapshotsDOCDB" } } ]
+				}
+			}
+		},
+		"cwloggrouplambdaDeleteOldSnapshotsDOCDB":{
+			"Type": "AWS::Logs::LogGroup",
+			"Description": "Log group for the lambdaDeleteOldSnapshotsDOCDB function's logs",
+			"Properties": {
+				"RetentionInDays": { "Ref": "LambdaCWLogRetention" },
+				"LogGroupName": { 
+					"Fn::Sub": [ "/aws/lambda/${func}", { "func": {	"Ref" : "LogGroupName" } } ]
+				}
+			}
+		}
+    },
+	"Outputs": {
+		"BackupFailedTopic": {
+			"Description": "Subscribe to this topic to receive alerts of failed backups",
+			"Value": {
+				"Ref": "topicBackupsFailed"
+			}
+		},
+		"CopyFailedTopic": {
+			"Condition": "Copy",
+			"Description": "Subscribe to this topic to receive alerts of failures at copying snapshots to destination region",
+			"Value": {
+				"Ref": "topicCopyFailed"
+			}
+		},
+		"DeleteOldFailedTopic": {
+			"Condition": "DeleteOld",
+			"Description": "Subscribe to this topic to receive alerts of failures at deleting old snapshots",
+			"Value": {
+				"Ref": "topicDeleteOldFailed"
+			}
+		}
+	},
+    "Description": "Snapshots Tool for DOCDB cross-region and cross-account (destination account stack)"
+}

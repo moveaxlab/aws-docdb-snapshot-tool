@@ -1,0 +1,12 @@
+.terraform/
+.idea
+config-map-aws-auth*.yaml
+kubeconfig_*
+aws-auth-cm.yaml
+eu-central-1*.yml
+.helmsman-tmp
+provider.tf
+backend.tf
+.terragrunt-cache/
+.terraform.lock.hcl
+terraform/terragrunt.hcl
