@@ -11,5 +11,5 @@ locals {
   snaptool_namePattern          = "sit"
   snaptool_backupInterval       = "24"
   snaptool_retention_days       = 7
-  snaptool_repo_release_version = "0.0.1"
+  snaptool_repo_release_version = "1.0.0"
 }
