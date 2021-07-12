@@ -29,6 +29,7 @@ locals {
   tags                  = {
     environment = "${local.environment}"
     context = "docdb"
+    snaptool-version = "${local.snaptool_repo_release_version}"
   }
 }
 
