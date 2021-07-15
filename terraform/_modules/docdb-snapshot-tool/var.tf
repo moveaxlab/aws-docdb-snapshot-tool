@@ -1,3 +1,8 @@
+variable "environment" {
+  type = string
+  description = "Environment"
+}
+
 variable "stack_name" {
   type = string
   description = "CloudFormation stack name"

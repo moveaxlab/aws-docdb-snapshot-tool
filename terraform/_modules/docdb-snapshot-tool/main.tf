@@ -39,6 +39,7 @@ resource "aws_cloudformation_stack" "network" {
   name          = var.stack_name
   capabilities  = ["CAPABILITY_IAM"]
   parameters    = {
+    Environment = var.environment,
     CodeBucket = var.code_bucket,
     Region = var.region,
     DrRegion = var.dr_region,

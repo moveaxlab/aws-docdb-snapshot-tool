@@ -1,6 +1,11 @@
 {
     "AWSTemplateFormatVersion": "2010-09-09",
     "Parameters": {
+		"Environment": {
+			"Type": "String",
+			"Default": "sit",
+			"Description": "Environment name"
+		},
         "CodeBucket": {
 			"Type": "String",
 			"Default": "DEFAULT_BUCKET",
@@ -69,7 +74,7 @@
 		},
 		"LogGroupName": {
 			"Type": "String",
-			"Default": "lambdaDeleteOldSnapshotsDOCDB-source",
+			"Default": "docdb-snapshot-tool",
 			"Description": "Name for DOCDB snapshot log group."
 		},
 		"CopySchedule": {
@@ -559,24 +564,26 @@
 				}]
 			}
 		},
-		"cwloggrouplambdaCopySnapshotsDOCDB":{
+		"cwloggrouplambda":{
 			"Type": "AWS::Logs::LogGroup",
-			"Description": "Log group for the lambdaCopySnapshotsDOCDB function's logs",
-			"DependsOn": "lambdaCopySnapshotsDOCDB",
+			"Description": "Log group for the lambda function's logs",
+			"DependsOn": ["lambdaCopySnapshotsDOCDB", "lambdaDeleteOldSnapshotsDOCDB"],
 			"Properties": {
 				"RetentionInDays": { "Ref": "LambdaCWLogRetention" }, 
 				"LogGroupName": { 
-					"Fn::Sub": [ "/aws/lambda/${func}", { "func": {	"Ref" : "lambdaCopySnapshotsDOCDB" } } ]
-				}
-			}
-		},
-		"cwloggrouplambdaDeleteOldSnapshotsDOCDB":{
-			"Type": "AWS::Logs::LogGroup",
-			"Description": "Log group for the lambdaDeleteOldSnapshotsDOCDB function's logs",
-			"Properties": {
-				"RetentionInDays": { "Ref": "LambdaCWLogRetention" },
-				"LogGroupName": { 
-					"Fn::Sub": [ "/aws/lambda/${func}", { "func": {	"Ref" : "LogGroupName" } } ]
+					"Fn::Sub": [ 
+						"/aws/lambda/${func}", { 
+							"func": {
+								"Fn::Join": [
+									"-",
+									[
+										{ "Ref" : "Environment" },
+										{ "Ref" : "LogGroupName" }
+									]
+								] 
+							}
+						} 
+					]
 				}
 			}
 		}
