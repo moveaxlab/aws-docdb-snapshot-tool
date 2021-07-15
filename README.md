@@ -13,3 +13,6 @@ Inside *terraform/env/env.hcl* file specify cloudformation template (inside *doc
 Possibilities are:
 * snapshot_tool_docdb.json: provides take, copy and delete methods
 * snapshot_tool_docdb_copy_and_delete.json: provides only copy and delete methods
+
+## To Be Implemented
+Create new template that enables delete of old snapshot in both regions.
